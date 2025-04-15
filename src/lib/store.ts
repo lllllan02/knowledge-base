@@ -1,6 +1,7 @@
+'use client';
 import { create } from 'zustand';
-import { Note, Folder } from './db/database';
-import { noteOperations, folderOperations } from './db/operations';
+import { Note, Folder, Attachment } from './db/database';
+import { noteOperations, folderOperations, attachmentOperations } from './db/operations';
 
 interface KnowledgeBaseState {
   // 当前选中的笔记
@@ -19,6 +20,10 @@ interface KnowledgeBaseState {
   tagFilter: string | null;
   // 是否正在加载数据
   isLoading: boolean;
+
+  // 附件相关
+  currentAttachments: Attachment[];
+  isLoadingAttachments: boolean;
 
   // 操作方法
   setCurrentNote: (note: Note | null) => void;
@@ -45,6 +50,11 @@ interface KnowledgeBaseState {
   createFolder: (folder: Omit<Folder, 'id' | 'createdAt'>) => Promise<number>;
   updateFolder: (id: number, name: string) => Promise<void>;
   deleteFolder: (id: number) => Promise<void>;
+
+  // 附件操作
+  loadAttachments: (noteId: number) => Promise<void>;
+  uploadAttachment: (noteId: number, file: File) => Promise<number | null>;
+  deleteAttachment: (id: number) => Promise<void>;
 }
 
 export const useStore = create<KnowledgeBaseState>((set, get) => ({
@@ -56,6 +66,9 @@ export const useStore = create<KnowledgeBaseState>((set, get) => ({
   searchQuery: '',
   tagFilter: null,
   isLoading: false,
+
+  currentAttachments: [],
+  isLoadingAttachments: false,
 
   setCurrentNote: (note) => set({ currentNote: note }),
   setCurrentFolder: (folder) => set({ currentFolder: folder }),
@@ -250,6 +263,62 @@ export const useStore = create<KnowledgeBaseState>((set, get) => ({
       }
     } catch (error) {
       console.error('删除文件夹失败:', error);
+      set({ isLoading: false });
+      throw error;
+    }
+  },
+
+  // 附件操作
+  loadAttachments: async (noteId: number) => {
+    try {
+      set({ isLoadingAttachments: true });
+      const attachments = await attachmentOperations.getAttachmentsByNote(noteId);
+      set({ currentAttachments: attachments, isLoadingAttachments: false });
+    } catch (error) {
+      console.error('加载附件失败:', error);
+      set({ isLoadingAttachments: false });
+    }
+  },
+  
+  uploadAttachment: async (noteId: number, file: File) => {
+    try {
+      set({ isLoading: true });
+      const newAttachmentId = await attachmentOperations.createAttachment({
+        noteId,
+        name: file.name,
+        type: file.type,
+        data: file
+      });
+      
+      // 获取新添加的附件
+      const newAttachment = await attachmentOperations.getAttachmentById(newAttachmentId);
+      if (newAttachment) {
+        set((state) => ({ 
+          currentAttachments: [...state.currentAttachments, newAttachment],
+          isLoading: false 
+        }));
+      }
+      
+      return newAttachmentId;
+    } catch (error) {
+      console.error('上传附件失败:', error);
+      set({ isLoading: false });
+      return null;
+    }
+  },
+  
+  deleteAttachment: async (id: number) => {
+    try {
+      set({ isLoading: true });
+      await attachmentOperations.deleteAttachment(id);
+      
+      // 从当前状态中删除附件
+      set((state) => ({ 
+        currentAttachments: state.currentAttachments.filter(att => att.id !== id),
+        isLoading: false
+      }));
+    } catch (error) {
+      console.error('删除附件失败:', error);
       set({ isLoading: false });
       throw error;
     }
