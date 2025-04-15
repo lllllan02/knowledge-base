@@ -162,4 +162,44 @@ export const attachmentOperations = {
   async deleteAttachment(id: number): Promise<void> {
     await db.attachments.delete(id);
   }
+};
+
+// 双向链接相关操作
+export const wikilinkOperations = {
+  // 根据链接名称查找笔记
+  async findNotesByTitle(title: string): Promise<Note[]> {
+    const normalizedTitle = title.toLowerCase().trim();
+    
+    // 先查找标题完全匹配的笔记
+    const exactMatch = await db.notes
+      .where('title')
+      .equalsIgnoreCase(normalizedTitle)
+      .toArray();
+    
+    if (exactMatch.length > 0) {
+      return exactMatch;
+    }
+    
+    // 如果没有找到完全匹配的，查找包含该标题的笔记
+    return db.notes
+      .filter(note => note.title.toLowerCase().includes(normalizedTitle))
+      .toArray();
+  },
+  
+  // 查找引用了指定笔记的所有笔记（反向链接）
+  async findBacklinks(noteId: number): Promise<Note[]> {
+    // 获取当前笔记的标题
+    const currentNote = await db.notes.get(noteId);
+    if (!currentNote) return [];
+    
+    const normalizedTitle = currentNote.title.toLowerCase().trim();
+    
+    // 查找内容中包含 [[当前笔记标题]] 的笔记
+    return db.notes
+      .filter(note => 
+        note.id !== noteId && 
+        note.content.toLowerCase().includes(`[[${normalizedTitle}]]`)
+      )
+      .toArray();
+  }
 }; 

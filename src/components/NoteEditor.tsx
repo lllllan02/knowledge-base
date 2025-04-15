@@ -4,82 +4,12 @@ import { useEffect, useState, useCallback, memo, useRef } from 'react';
 import { useStore } from '@/lib/store';
 import Editor, { useMonaco } from '@monaco-editor/react';
 import { extractTitleFromContent, extractTagsFromContent, debounce } from '@/utils/helpers';
-import { FaSave, FaEye, FaEdit, FaTags, FaPaperclip } from 'react-icons/fa';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import rehypeHighlight from 'rehype-highlight';
+import { FaSave, FaEye, FaEdit, FaTags, FaPaperclip, FaLink } from 'react-icons/fa';
 import 'highlight.js/styles/github.css';
 import AttachmentManager from './AttachmentManager';
-import { attachmentOperations } from '@/lib/db/operations';
 import { Attachment } from '@/lib/db/database';
-
-// 自定义图片渲染组件，支持附件图片
-const CustomImageRenderer = ({ src, alt }: { src: string, alt?: string }) => {
-  const { currentAttachments } = useStore();
-  const [imageUrl, setImageUrl] = useState<string>('');
-  
-  useEffect(() => {
-    const loadImage = async () => {
-      // 检查是否是附件链接
-      if (src.startsWith('attachment://')) {
-        const attachmentId = parseInt(src.replace('attachment://', ''));
-        if (!isNaN(attachmentId)) {
-          // 先从当前加载的附件中查找
-          const attachment = currentAttachments.find(att => att.id === attachmentId);
-          if (attachment && attachment.data) {
-            const objectUrl = URL.createObjectURL(attachment.data);
-            setImageUrl(objectUrl);
-            return () => URL.revokeObjectURL(objectUrl);
-          } else {
-            // 如果当前附件中没有，则从数据库加载
-            try {
-              const attachment = await attachmentOperations.getAttachmentById(attachmentId);
-              if (attachment && attachment.data) {
-                const objectUrl = URL.createObjectURL(attachment.data);
-                setImageUrl(objectUrl);
-                return () => URL.revokeObjectURL(objectUrl);
-              }
-            } catch (error) {
-              console.error('加载附件图片失败:', error);
-              setImageUrl('');
-            }
-          }
-        }
-      } else {
-        // 处理普通URL
-        setImageUrl(src);
-      }
-    };
-    
-    loadImage();
-    
-    return () => {
-      // URL.revokeObjectURL在loadImage函数返回的清理函数中处理
-    };
-  }, [src, currentAttachments]);
-  
-  if (!imageUrl) {
-    return <span className="text-red-500">[图片加载失败]</span>;
-  }
-  
-  return <img src={imageUrl} alt={alt || ''} className="max-w-full" />;
-};
-
-// 使用memo优化Markdown预览性能
-const MarkdownPreview = memo(({ content }: { content: string }) => (
-  <div className="prose max-w-none p-4 overflow-auto h-full">
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      rehypePlugins={[rehypeHighlight]}
-      components={{
-        img: ({ node, ...props }) => <CustomImageRenderer src={props.src || ''} alt={props.alt} />
-      }}
-    >
-      {content}
-    </ReactMarkdown>
-  </div>
-));
-MarkdownPreview.displayName = 'MarkdownPreview';
+import MarkdownProcessor from './MarkdownProcessor';
+import BacklinksPanel from './BacklinksPanel';
 
 // 使用memo优化Monaco编辑器性能
 const MonacoEditor = memo(({ content, onChange, onEditorMount }: { 
@@ -110,6 +40,14 @@ const MonacoEditor = memo(({ content, onChange, onEditorMount }: {
 ));
 MonacoEditor.displayName = 'MonacoEditor';
 
+// 使用memo优化Markdown预览性能
+const MarkdownPreview = memo(({ content }: { content: string }) => (
+  <div className="prose max-w-none p-4 overflow-auto h-full">
+    <MarkdownProcessor content={content} />
+  </div>
+));
+MarkdownPreview.displayName = 'MarkdownPreview';
+
 export default function NoteEditor() {
   const { 
     currentNote, 
@@ -117,13 +55,19 @@ export default function NoteEditor() {
     isNoteDirty, 
     setNoteDirty,
     isLoading,
-    currentAttachments
+    notes,
+    backlinks
   } = useStore();
   
   const [content, setContent] = useState('');
   const [isPreview, setIsPreview] = useState(false);
   const [isShowingTags, setIsShowingTags] = useState(false);
   const [isShowingAttachments, setIsShowingAttachments] = useState(false);
+  const [showWikilinkSelector, setShowWikilinkSelector] = useState(false);
+  const [wikilinkSearch, setWikilinkSearch] = useState('');
+  const [filteredNotes, setFilteredNotes] = useState<typeof notes>([]);
+  const [cursorPosition, setCursorPosition] = useState<{ lineNumber: number, column: number } | null>(null);
+  
   const monaco = useMonaco();
   const editorRef = useRef<any>(null);
   
@@ -140,6 +84,35 @@ export default function NoteEditor() {
         }
       });
       monaco.editor.setTheme('lightTheme');
+      
+      // 添加双向链接的语法高亮
+      monaco.languages.registerCompletionItemProvider('markdown', {
+        provideCompletionItems: (model, position) => {
+          const textUntilPosition = model.getValueInRange({
+            startLineNumber: position.lineNumber,
+            startColumn: 1,
+            endLineNumber: position.lineNumber,
+            endColumn: position.column,
+          });
+          
+          // 当用户输入 [[ 时触发补全
+          if (textUntilPosition.endsWith('[[')) {
+            return {
+              suggestions: [
+                {
+                  label: '笔记链接',
+                  kind: monaco.languages.CompletionItemKind.Snippet,
+                  insertText: '${1:笔记标题}]]',
+                  insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                  documentation: '插入到另一篇笔记的链接',
+                },
+              ],
+            };
+          }
+          
+          return { suggestions: [] };
+        },
+      });
     }
   }, [monaco]);
   
@@ -222,7 +195,68 @@ export default function NoteEditor() {
   // 获取编辑器实例引用
   const handleEditorMount = useCallback((editor: any) => {
     editorRef.current = editor;
-  }, []);
+    
+    // 监听光标位置变化
+    editor.onDidChangeCursorPosition((e: any) => {
+      setCursorPosition({
+        lineNumber: e.position.lineNumber,
+        column: e.position.column
+      });
+    });
+    
+    // 添加快捷键：Ctrl+/ 触发双向链接选择器
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Slash, () => {
+      setShowWikilinkSelector(true);
+    });
+  }, [monaco]);
+  
+  // 处理双向链接搜索
+  useEffect(() => {
+    if (showWikilinkSelector && wikilinkSearch) {
+      const search = wikilinkSearch.toLowerCase();
+      const filtered = notes
+        .filter(note => note.title.toLowerCase().includes(search))
+        .slice(0, 10); // 限制结果数量
+      setFilteredNotes(filtered);
+    } else {
+      setFilteredNotes([]);
+    }
+  }, [notes, wikilinkSearch, showWikilinkSelector]);
+  
+  // 插入双向链接
+  const insertWikilink = useCallback((noteTitle: string) => {
+    if (!editorRef.current || !cursorPosition) return;
+    
+    const markdownText = `[[${noteTitle}]]`;
+    
+    // 获取编辑器实例
+    const editor = editorRef.current;
+    const position = {
+      lineNumber: cursorPosition.lineNumber,
+      column: cursorPosition.column
+    };
+    
+    const range = {
+      startLineNumber: position.lineNumber,
+      startColumn: position.column,
+      endLineNumber: position.lineNumber,
+      endColumn: position.column
+    };
+    
+    // 在当前光标位置插入链接
+    editor.executeEdits("wikilink-insert", [{
+      range,
+      text: markdownText,
+      forceMoveMarkers: true
+    }]);
+    
+    // 关闭选择器
+    setShowWikilinkSelector(false);
+    setWikilinkSearch('');
+    
+    // 聚焦回编辑器
+    editor.focus();
+  }, [cursorPosition]);
   
   // 如果没有选中笔记，显示空白
   if (!currentNote) {
@@ -266,6 +300,15 @@ export default function NoteEditor() {
           >
             <FaPaperclip />
           </button>
+          {!isPreview && (
+            <button
+              onClick={() => setShowWikilinkSelector(true)}
+              className="p-2 rounded hover:bg-gray-100"
+              title="插入笔记链接 (Ctrl+/)"
+            >
+              <FaLink />
+            </button>
+          )}
         </div>
         <div className="flex items-center">
           {isLoading && <span className="text-sm text-blue-500 mr-2">保存中...</span>}
@@ -304,13 +347,66 @@ export default function NoteEditor() {
         {isPreview ? (
           <MarkdownPreview content={content} />
         ) : (
-          <MonacoEditor 
-            content={content} 
-            onChange={handleEditorChange}
-            onEditorMount={handleEditorMount}
-          />
+          <div className="relative h-full">
+            <MonacoEditor 
+              content={content} 
+              onChange={handleEditorChange}
+              onEditorMount={handleEditorMount}
+            />
+            
+            {/* 双向链接选择器 */}
+            {showWikilinkSelector && (
+              <div className="absolute top-1/4 left-1/2 transform -translate-x-1/2 bg-white shadow-xl rounded-lg border border-gray-200 w-80 z-10">
+                <div className="p-3 border-b border-gray-200">
+                  <input
+                    type="text"
+                    className="w-full border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="搜索笔记..."
+                    value={wikilinkSearch}
+                    onChange={(e) => setWikilinkSearch(e.target.value)}
+                    autoFocus
+                  />
+                </div>
+                <div className="max-h-64 overflow-y-auto">
+                  {filteredNotes.length > 0 ? (
+                    <ul className="divide-y divide-gray-100">
+                      {filteredNotes.map((note) => (
+                        <li
+                          key={note.id}
+                          className="p-2 hover:bg-blue-50 cursor-pointer"
+                          onClick={() => insertWikilink(note.title)}
+                        >
+                          {note.title}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="p-4 text-center text-gray-500">
+                      {wikilinkSearch ? "没有找到匹配的笔记" : "输入关键词搜索笔记"}
+                    </div>
+                  )}
+                </div>
+                <div className="p-3 border-t border-gray-200 text-right">
+                  <button
+                    className="text-sm text-gray-500 hover:text-gray-700"
+                    onClick={() => {
+                      setShowWikilinkSelector(false);
+                      setWikilinkSearch('');
+                    }}
+                  >
+                    关闭
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         )}
       </div>
+      
+      {/* 反向链接面板 */}
+      {backlinks.length > 0 && (
+        <BacklinksPanel />
+      )}
       
       {/* 附件管理区域 */}
       {isShowingAttachments && (

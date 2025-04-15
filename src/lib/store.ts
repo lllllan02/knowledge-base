@@ -1,7 +1,8 @@
 'use client';
 import { create } from 'zustand';
 import { Note, Folder, Attachment } from './db/database';
-import { noteOperations, folderOperations, attachmentOperations } from './db/operations';
+import { noteOperations, folderOperations, attachmentOperations, wikilinkOperations } from './db/operations';
+import { extractWikilinks } from '@/utils/helpers';
 
 interface KnowledgeBaseState {
   // 当前选中的笔记
@@ -24,6 +25,11 @@ interface KnowledgeBaseState {
   // 附件相关
   currentAttachments: Attachment[];
   isLoadingAttachments: boolean;
+
+  // 双向链接相关
+  backlinks: Note[];
+  isLoadingBacklinks: boolean;
+  linkedNotes: Map<string, Note[]>;
 
   // 操作方法
   setCurrentNote: (note: Note | null) => void;
@@ -55,6 +61,10 @@ interface KnowledgeBaseState {
   loadAttachments: (noteId: number) => Promise<void>;
   uploadAttachment: (noteId: number, file: File) => Promise<number | null>;
   deleteAttachment: (id: number) => Promise<void>;
+
+  // 双向链接操作
+  loadBacklinks: (noteId: number) => Promise<void>;
+  findLinkedNote: (title: string) => Promise<Note | null>;
 }
 
 export const useStore = create<KnowledgeBaseState>((set, get) => ({
@@ -70,7 +80,26 @@ export const useStore = create<KnowledgeBaseState>((set, get) => ({
   currentAttachments: [],
   isLoadingAttachments: false,
 
-  setCurrentNote: (note) => set({ currentNote: note }),
+  backlinks: [],
+  isLoadingBacklinks: false,
+  linkedNotes: new Map(),
+
+  setCurrentNote: (note) => {
+    set({ currentNote: note });
+    
+    if (note?.id) {
+      get().loadBacklinks(note.id);
+      
+      if (note.content) {
+        const wikilinks = extractWikilinks(note.content);
+        for (const link of wikilinks) {
+          get().findLinkedNote(link);
+        }
+      }
+    } else {
+      set({ backlinks: [] });
+    }
+  },
   setCurrentFolder: (folder) => set({ currentFolder: folder }),
   setNotes: (notes) => set({ notes }),
   setFolders: (folders) => set({ folders }),
@@ -171,7 +200,7 @@ export const useStore = create<KnowledgeBaseState>((set, get) => ({
     try {
       await noteOperations.updateNote(id, noteData);
       
-      // 更新当前笔记和笔记列表中的笔记，而不是重新加载所有笔记
+      // 更新当前笔记和笔记列表中的笔记
       const updatedNote = await noteOperations.getNoteById(id);
       if (updatedNote) {
         set((state) => ({ 
@@ -179,6 +208,19 @@ export const useStore = create<KnowledgeBaseState>((set, get) => ({
           notes: state.notes.map(note => note.id === id ? updatedNote : note),
           isNoteDirty: false
         }));
+        
+        // 如果更新了内容，则重新加载反向链接
+        if (noteData.content && updatedNote.id) {
+          await get().loadBacklinks(updatedNote.id);
+          
+          // 提取并预加载所有双向链接对应的笔记
+          if (updatedNote.content) {
+            const wikilinks = extractWikilinks(updatedNote.content);
+            for (const link of wikilinks) {
+              await get().findLinkedNote(link);
+            }
+          }
+        }
       }
     } catch (error) {
       console.error('更新笔记失败:', error);
@@ -321,6 +363,40 @@ export const useStore = create<KnowledgeBaseState>((set, get) => ({
       console.error('删除附件失败:', error);
       set({ isLoading: false });
       throw error;
+    }
+  },
+
+  // 加载反向链接（引用了当前笔记的笔记）
+  loadBacklinks: async (noteId: number) => {
+    try {
+      set({ isLoadingBacklinks: true });
+      const backlinks = await wikilinkOperations.findBacklinks(noteId);
+      set({ backlinks, isLoadingBacklinks: false });
+    } catch (error) {
+      console.error('加载反向链接失败:', error);
+      set({ isLoadingBacklinks: false });
+    }
+  },
+  
+  // 查找与标题匹配的笔记（用于显示双向链接）
+  findLinkedNote: async (title: string) => {
+    try {
+      // 先检查缓存中是否已有该标题对应的笔记
+      const { linkedNotes } = get();
+      if (!linkedNotes.has(title)) {
+        const matchedNotes = await wikilinkOperations.findNotesByTitle(title);
+        // 更新缓存
+        set((state) => ({
+          linkedNotes: new Map(state.linkedNotes).set(title, matchedNotes)
+        }));
+      }
+      
+      const notesForTitle = get().linkedNotes.get(title) || [];
+      // 返回最匹配的第一个笔记
+      return notesForTitle.length > 0 ? notesForTitle[0] : null;
+    } catch (error) {
+      console.error('查找链接笔记失败:', error);
+      return null;
     }
   },
 })); 

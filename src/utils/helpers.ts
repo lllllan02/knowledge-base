@@ -12,33 +12,38 @@ export function formatDate(date: Date): string {
 }
 
 /**
- * 从文本内容中提取标题
+ * 从笔记内容中提取标题
+ * 使用第一行作为标题，如果没有则返回"无标题笔记"
  */
 export function extractTitleFromContent(content: string): string {
-  // 尝试从Markdown标题中提取
-  const titleMatch = content.match(/^#\s+(.+)$/m);
-  if (titleMatch && titleMatch[1]) {
-    return titleMatch[1].trim();
-  }
+  if (!content.trim()) return "无标题笔记";
   
-  // 尝试从第一行非空内容中提取
-  const firstLineMatch = content.match(/^(.+)$/m);
-  if (firstLineMatch && firstLineMatch[1]) {
-    return firstLineMatch[1].trim();
-  }
+  const firstLine = content.trim().split('\n')[0];
+  // 移除Markdown标记符，如#, *, _, -等
+  const cleanTitle = firstLine.replace(/^[\s#\-*_]+/, '').trim();
   
-  return '无标题笔记';
+  return cleanTitle || "无标题笔记";
 }
 
 /**
- * 从文本内容中提取可能的标签
+ * 从笔记内容中提取标签
+ * 采用类似Twitter的#标签格式
  */
 export function extractTagsFromContent(content: string): string[] {
-  const tagRegex = /#([a-zA-Z0-9\u4e00-\u9fa5_-]+)/g;
-  const matches = content.match(tagRegex) || [];
+  if (!content.trim()) return [];
   
-  // 去掉#前缀并去重
-  return [...new Set(matches.map(tag => tag.substring(1)))];
+  const tags: string[] = [];
+  const regex = /#([a-zA-Z0-9_\u4e00-\u9fa5]+)/g;
+  let match;
+  
+  while ((match = regex.exec(content)) !== null) {
+    const tag = match[1].toLowerCase();
+    if (!tags.includes(tag)) {
+      tags.push(tag);
+    }
+  }
+  
+  return tags;
 }
 
 /**
@@ -58,16 +63,22 @@ export function generateId(): string {
 
 /**
  * 防抖函数
+ * 确保在一系列快速调用中只有最后一次调用会被执行
  */
 export function debounce<T extends (...args: any[]) => any>(
-  fn: T,
-  delay: number
+  func: T,
+  wait: number
 ): (...args: Parameters<T>) => void {
-  let timeoutId: ReturnType<typeof setTimeout>;
+  let timeout: NodeJS.Timeout | null = null;
   
   return function(...args: Parameters<T>) {
-    clearTimeout(timeoutId);
-    timeoutId = setTimeout(() => fn(...args), delay);
+    if (timeout !== null) {
+      clearTimeout(timeout);
+    }
+    
+    timeout = setTimeout(() => {
+      func(...args);
+    }, wait);
   };
 }
 
@@ -95,9 +106,42 @@ export function isMarkdownFile(filename: string): boolean {
 }
 
 /**
- * 将相对路径转换为绝对路径
+ * 调整相对路径为绝对路径
  */
-export function toAbsolutePath(path: string, basePath: string): string {
+export function resolveRelativePath(basePath: string, path: string): string {
   if (path.startsWith('/')) return path;
   return `${basePath.replace(/\/$/, '')}/${path.replace(/^\//, '')}`;
+}
+
+/**
+ * 从笔记内容中提取双向链接的正则表达式
+ * 匹配格式为 [[链接名称]] 的双向链接
+ */
+export const WIKILINK_REGEX = /\[\[([^\[\]]+?)\]\]/g;
+
+/**
+ * 从文本中提取双向链接
+ * @param content 笔记内容
+ * @returns 提取的双向链接数组
+ */
+export function extractWikilinks(content: string): string[] {
+  const links: string[] = [];
+  const matches = content.matchAll(WIKILINK_REGEX);
+  
+  for (const match of matches) {
+    if (match[1] && !links.includes(match[1].trim())) {
+      links.push(match[1].trim());
+    }
+  }
+  
+  return links;
+}
+
+/**
+ * 格式化双向链接，转换为可用于搜索和匹配的格式
+ * @param title 链接标题
+ * @returns 格式化后的链接标题
+ */
+export function normalizeWikilinkTitle(title: string): string {
+  return title.trim().toLowerCase();
 } 
